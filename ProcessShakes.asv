@@ -1,0 +1,114 @@
+%% load shaken bot and convert to grayscale
+vr      = VideoReader('tanks2.avi');
+nFrames = floor(vr.Duration*vr.FrameRate);
+mov     = zeros(vr.Height,vr.Width,nFrames,'single');
+nX      = [vr.Height vr.Width];
+
+j = 1;
+while hasFrame(vr)
+  cFrame     = readFrame(vr);
+  mov(:,:,j) = mean(single(cFrame),3)/255;
+  j = j+1;
+end
+
+%% choose two frames with large shift, see if we can detect it
+movA = mov(:,:,156);
+movB = mov(:,:,157);
+
+% compute cross-correlation
+tic;
+xv = xcorr2(movA,movB);
+t_cpu=toc;
+
+% what about on the GPU?
+movA = gpuArray(movA);
+movB = gpuArray(movB);
+tic;
+xv = xcorr2(movA,movB);
+xv(1);
+t_gpu=toc;
+xv = gather(xv);
+movA = gather(movA);
+movB = gather(movB);
+
+fprintf('CPU: %2.2fs\nGPU: %2.2fs \t speedup = %2.2f\n',t_cpu,t_gpu,t_cpu/t_gpu);
+
+%% find shift from cross-correlation
+centerpt = ceil(size(xv)/2);
+% find max corr
+[~,ix]    = max(xv(:));
+[ix,iy]   = ind2sub(size(xv),ix);
+xyshift   = [ix iy] - centerpt;
+
+clf
+subplot(1,2,1),
+imagesc(xv);
+title('cross-correlation');
+subplot(1,2,2),
+plot(xv(centerpt(1),centerpt(2)+[-20:20]),'linewidth',2);
+hold all;
+plot(xv(centerpt(1)+[-20:20],centerpt(2)),'linewidth',2);
+title('x-y profiles at center');
+legend('x','y');
+axis tight;
+
+
+%% how do we high-pass filter? let's do it in the frequency domain!
+m1      = fftshift(fftn(movA));
+m2      = fftshift(fftn(movB));
+clf
+subplot(1,2,1),
+imagesc(abs(m1),[0 5e2])
+% remove all the high frequencies
+highfilt = zeros(size(m1),'single');
+
+
+%% whitening in the frequency domain!
+m1      = fftn(movA);
+m2      = fftn(movB);
+eps0    = single(1e-20);
+m1      = m1./(abs(m1)+eps0);
+m2      = m2./(abs(m2)+eps0);
+
+% cross-correlation in fft domain
+cc      = real(ifftn(m1 .* conj(m2)));
+cc0     = fftshift(cc);
+
+
+%% where is the shift? :(
+% we can do center-surround filtering easily in the time domain
+% first, compute convolved image
+sigx = 5;
+[x,y] = meshgrid([-20:20],[-20:20]);
+gaus = exp(-(x.^2+y.^2)/(2*sigx^2))/sqrt(2*pi*sigx^2);
+fmovB = filter2(gaus,movB);
+tic;
+fmovA = filter2(gaus,movA);
+t_cpu=toc;
+movA  = gpuArray(movA);
+tic;
+fmovA = filter2(gaus,movA);
+fmovA(1);
+t_gpu=toc;
+fmovA = gather(fmovA);
+movA  = gather(movA);
+fprintf('CPU: %2.4fs\nGPU: %2.4fs \t speedup = %2.2f\n',t_cpu,t_gpu,t_cpu/t_gpu);
+
+% then subtract this from the original image
+fmovA = movA - 0.2*fmovA;
+fmovB = movB - 0.2*fmovB;
+imagesc(fmovA);
+
+%% take cross-correlation of the filtered images
+xv = xcorr2(movA,movB);
+% find max corr
+[~,ix]    = max(xv(:));
+[ix,iy]   = ind2sub(size(xv),ix);
+xyshift   = [ix iy] - centerpt;
+
+
+
+
+
+
+
